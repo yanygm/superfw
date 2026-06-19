@@ -2,110 +2,105 @@ name: SuperFW release
 run-name: Build a full SuperFW release
 
 on:
+  # 保留原有自动触发：master推送 + 所有tag推送
   push:
     branches:
       - 'master'
     tags:
       - '*'
+  # 新增手动触发，支持输入指定分支
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: 要编译的分支名称，留空则使用默认仓库分支
+        required: false
+        default: 'flash_gba_nor_use_slowld'
 
 jobs:
   build-firmware:
     runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        board: [sd, lite, chis]
+
     steps:
       - name: Install dependencies
         run: sudo apt-get install gcc-arm-none-eabi
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          submodules: 'true'
+          submodules: true
+          # 手动输入分支优先，无输入则使用事件自带分支
+          ref: ${{ github.event.inputs.target_branch || github.ref_name }}
+
       - name: Get short SHA
         id: slug
         run: echo "sha8=$(echo ${GITHUB_SHA} | cut -c1-8)" >> $GITHUB_OUTPUT
-      - name: Get release version
-        id: tagversion
-        if: startsWith(github.ref, 'refs/tags/')
-        run: fullref="${{ github.ref }}"; tagversion=${fullref#"refs/tags/"}; echo "tagversion=${tagversion}" >> $GITHUB_OUTPUT
+
       - name: Arrange files
         run: |
           cp res/patches.db patches.db
-      - name: Build firmware image (SD)
-        run: |
-          make BOARD=sd clean && make BOARD=sd COMPRESSION_RATIO=9
-          mv superfw.gba superfw-sd.fw
-          cp superfw.dldi.payload superfw-sd.dldi
-      - name: Upload debug artifacts (SD)
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: superfw-sd-debug-${{ steps.slug.outputs.sha8 }}
-          path: |
-            superfw-*.fw
-            directsave.elf
-            firmware.elf
-            firmware.ewram.elf
-            ingamemenu.elf
-            superfw.dldi.elf
-      - name: Build firmware image (Lite)
-        run: |
-          make BOARD=lite clean && make BOARD=lite COMPRESSION_RATIO=9
-          mv superfw.gba superfw-lite.fw
-          cp superfw.dldi.payload superfw-lite.dldi
-      - name: Upload debug artifacts (Lite)
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: superfw-lite-debug-${{ steps.slug.outputs.sha8 }}
-          path: |
-            superfw-*.fw
-            directsave.elf
-            firmware.elf
-            firmware.ewram.elf
-            ingamemenu.elf
-            superfw.dldi.elf
-      - name: Upload firmware build
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: superfw-${{ steps.slug.outputs.sha8 }}
-          path: superfw-*.fw
-      - name: Upload extra artifacts
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: superfw-dev-${{ steps.slug.outputs.sha8 }}
-          path: |
-            superfw-*.fw
-            superfw-*.dldi
-            patches.db
-      - name: Create release
-        id: create_release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref }}
-          draft: false
-          prerelease: false
-      - name: Upload Release Asset (SD)
-        uses: actions/upload-release-asset@v1
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./superfw-sd.fw
-          asset_name: superfw-sd-${{ steps.tagversion.outputs.tagversion }}.fw
-          asset_content_type: application/octet-stream
-      - name: Upload Release Asset (Lite)
-        uses: actions/upload-release-asset@v1
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./superfw-lite.fw
-          asset_name: superfw-lite-${{ steps.tagversion.outputs.tagversion }}.fw
-          asset_content_type: application/octet-stream
 
+      - name: Build firmware
+        run: |
+          make BOARD=${{ matrix.board }} clean
+          make BOARD=${{ matrix.board }} COMPRESSION_RATIO=9
+          mv superfw.gba superfw-${{ matrix.board }}.fw
+          cp superfw.dldi.payload superfw-${{ matrix.board }}.dldi
+
+      - name: Upload firmware release
+        uses: actions/upload-artifact@v4
+        with:
+          name: superfw-release-${{ matrix.board }}-${{ steps.slug.outputs.sha8 }}
+          path: |
+            superfw-${{ matrix.board }}.fw
+
+      - name: Upload debug artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: superfw-debug-${{ matrix.board }}-${{ steps.slug.outputs.sha8 }}
+          path: |
+            superfw-${{ matrix.board }}.fw
+            directsave.elf
+            firmware.elf
+            firmware.ewram.elf
+            ingamemenu.elf
+            superfw.dldi.elf
+
+      - name: Upload extra artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: superfw-dev-${{ matrix.board }}-${{ steps.slug.outputs.sha8 }}
+          path: |
+            superfw-${{ matrix.board }}.fw
+            superfw-${{ matrix.board }}.dldi
+            patches.db
+
+  release:
+    needs: build-firmware
+    # 仅tag推送时才执行发布，手动选分支不会自动创建Release
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          ref: ${{ github.event.inputs.target_branch || github.ref_name }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: 'superfw-release-*'
+          path: artifacts
+
+      - name: Create release and upload firmware
+        run: |
+          gh release create "${GITHUB_REF#refs/tags/}" \
+            --title "Release ${GITHUB_REF#refs/tags/}" \
+            --notes-from-tag \
+            artifacts/**/*.fw
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
